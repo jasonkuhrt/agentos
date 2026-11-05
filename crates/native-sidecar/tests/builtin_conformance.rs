@@ -4306,6 +4306,163 @@ console.log(JSON.stringify({
     );
 }
 
+// Node 24 has these methods only behind `--js-base-64`, so the expected values
+// are written out from the spec and not compared to the host.
+const UINT8ARRAY_ENCODING_PROBE: &str = r#"
+const bytes = (...values) => new Uint8Array(values);
+const detached = () => {
+  const view = bytes(1, 2);
+  view.buffer.transfer();
+  return view;
+};
+const outOfBounds = () => {
+  const buffer = new ArrayBuffer(4, { maxByteLength: 8 });
+  const view = new Uint8Array(buffer, 2, 2);
+  buffer.resize(1);
+  return view;
+};
+const detachOnOptionRead = () => {
+  const view = bytes(1, 2);
+  return view.toBase64({
+    get alphabet() {
+      view.buffer.transfer();
+      return "base64";
+    },
+  });
+};
+const large = new Uint8Array(100_000).map((_, index) => index % 251);
+const sharedBytes = new Uint8Array(new SharedArrayBuffer(2));
+sharedBytes.set([1, 255]);
+
+const cases = [
+  // toHex
+  ["toHex lowercase", () => bytes(1, 2, 255).toHex(), "0102ff"],
+  ["toHex empty", () => bytes().toHex(), ""],
+  ["toHex subarray", () => bytes(0, 1, 2, 3).subarray(1, 3).toHex(), "0102"],
+  ["toHex SharedArrayBuffer", () => sharedBytes.toHex(), "01ff"],
+  ["toHex Buffer", () => Buffer.from([171]).toHex(), "ab"],
+  ["toHex Int8Array", () => Uint8Array.prototype.toHex.call(new Int8Array(1)), "TypeError"],
+  ["toHex plain object", () => Uint8Array.prototype.toHex.call({}), "TypeError"],
+  ["toHex detached", () => detached().toHex(), "TypeError"],
+  ["toHex out of bounds", () => outOfBounds().toHex(), "TypeError"],
+
+  // fromHex
+  ["fromHex mixed case", () => Uint8Array.fromHex("0aFf"), [10, 255]],
+  ["fromHex empty", () => Uint8Array.fromHex(""), []],
+  ["fromHex odd length", () => Uint8Array.fromHex("abc"), "SyntaxError"],
+  ["fromHex bad digit", () => Uint8Array.fromHex("zz"), "SyntaxError"],
+  ["fromHex partly valid pair", () => Uint8Array.fromHex("1g"), "SyntaxError"],
+  ["fromHex signed pair", () => Uint8Array.fromHex("+1"), "SyntaxError"],
+  ["fromHex whitespace", () => Uint8Array.fromHex("0 "), "SyntaxError"],
+  ["fromHex non-ascii digits", () => Uint8Array.fromHex("٠١"), "SyntaxError"],
+  ["fromHex number", () => Uint8Array.fromHex(12), "TypeError"],
+  ["fromHex String object", () => Uint8Array.fromHex(new String("00")), "TypeError"],
+  ["fromHex no argument", () => Uint8Array.fromHex(), "TypeError"],
+
+  // toBase64
+  ["toBase64 default", () => bytes(251, 255).toBase64(), "+/8="],
+  ["toBase64 one byte", () => bytes(1).toBase64(), "AQ=="],
+  ["toBase64 empty", () => bytes().toBase64(), ""],
+  ["toBase64 subarray", () => bytes(0, 1, 2, 3).subarray(1, 3).toBase64(), "AQI="],
+  ["toBase64 SharedArrayBuffer", () => sharedBytes.toBase64(), "Af8="],
+  ["toBase64 base64url", () => bytes(251, 255).toBase64({ alphabet: "base64url" }), "-_8="],
+  ["toBase64 omitPadding", () => bytes(251, 255).toBase64({ omitPadding: true }), "+/8"],
+  ["toBase64 omitPadding coerces", () => bytes(1).toBase64({ omitPadding: 1 }), "AQ"],
+  ["toBase64 keeps padding on falsy", () => bytes(1).toBase64({ omitPadding: 0 }), "AQ=="],
+  ["toBase64 function options", () => bytes(1).toBase64(() => {}), "AQ=="],
+  ["toBase64 unknown alphabet", () => bytes(1).toBase64({ alphabet: "hex" }), "TypeError"],
+  ["toBase64 null alphabet", () => bytes(1).toBase64({ alphabet: null }), "TypeError"],
+  ["toBase64 null options", () => bytes(1).toBase64(null), "TypeError"],
+  ["toBase64 number options", () => bytes(1).toBase64(1), "TypeError"],
+  ["toBase64 Int8Array", () => Uint8Array.prototype.toBase64.call(new Int8Array(1)), "TypeError"],
+  ["toBase64 detached", () => detached().toBase64(), "TypeError"],
+  ["toBase64 out of bounds", () => outOfBounds().toBase64(), "TypeError"],
+  ["toBase64 detached by option getter", detachOnOptionRead, "TypeError"],
+
+  // fromBase64: alphabets
+  ["fromBase64 default", () => Uint8Array.fromBase64("+/8="), [251, 255]],
+  ["fromBase64 unpadded", () => Uint8Array.fromBase64("+/8"), [251, 255]],
+  ["fromBase64 empty", () => Uint8Array.fromBase64(""), []],
+  ["fromBase64 only whitespace", () => Uint8Array.fromBase64(" \n"), []],
+  ["fromBase64 base64url", () => Uint8Array.fromBase64("-_8=", { alphabet: "base64url" }), [251, 255]],
+  ["fromBase64 url chars in base64", () => Uint8Array.fromBase64("-_8="), "SyntaxError"],
+  ["fromBase64 base64 chars in url", () => Uint8Array.fromBase64("+/8=", { alphabet: "base64url" }), "SyntaxError"],
+
+  // fromBase64: malformed input
+  ["fromBase64 ascii whitespace", () => Uint8Array.fromBase64(" A\tQ\n=\f=\r"), [1]],
+  ["fromBase64 vertical tab", () => Uint8Array.fromBase64("A\vQ=="), "SyntaxError"],
+  ["fromBase64 no-break space", () => Uint8Array.fromBase64("A Q=="), "SyntaxError"],
+  ["fromBase64 non-ascii", () => Uint8Array.fromBase64("éQ=="), "SyntaxError"],
+  ["fromBase64 single char", () => Uint8Array.fromBase64("A"), "SyntaxError"],
+  ["fromBase64 single trailing char", () => Uint8Array.fromBase64("AAAAA"), "SyntaxError"],
+  ["fromBase64 only padding", () => Uint8Array.fromBase64("=="), "SyntaxError"],
+  ["fromBase64 partial padding", () => Uint8Array.fromBase64("AQ="), "SyntaxError"],
+  ["fromBase64 excess padding", () => Uint8Array.fromBase64("AQ==="), "SyntaxError"],
+  ["fromBase64 data after padding", () => Uint8Array.fromBase64("AQ==AQ=="), "SyntaxError"],
+  ["fromBase64 data inside padding", () => Uint8Array.fromBase64("AA=A"), "SyntaxError"],
+
+  // fromBase64: lastChunkHandling
+  ["loose ignores extra bits", () => Uint8Array.fromBase64("AR=="), [1]],
+  ["loose ignores extra bits, no padding", () => Uint8Array.fromBase64("AAF"), [0, 1]],
+  ["strict padded", () => Uint8Array.fromBase64("AAE=", { lastChunkHandling: "strict" }), [0, 1]],
+  ["strict requires padding", () => Uint8Array.fromBase64("AQ", { lastChunkHandling: "strict" }), "SyntaxError"],
+  ["strict rejects extra bits", () => Uint8Array.fromBase64("AR==", { lastChunkHandling: "strict" }), "SyntaxError"],
+  ["stop-before-partial full chunks", () => Uint8Array.fromBase64("AQID", { lastChunkHandling: "stop-before-partial" }), [1, 2, 3]],
+  ["stop-before-partial drops one char", () => Uint8Array.fromBase64("AQIDA", { lastChunkHandling: "stop-before-partial" }), [1, 2, 3]],
+  ["stop-before-partial drops two chars", () => Uint8Array.fromBase64("AQIDAQ", { lastChunkHandling: "stop-before-partial" }), [1, 2, 3]],
+  ["stop-before-partial drops partial padding", () => Uint8Array.fromBase64("AQIDAQ=", { lastChunkHandling: "stop-before-partial" }), [1, 2, 3]],
+  ["stop-before-partial keeps padded chunk", () => Uint8Array.fromBase64("AQIDAQ==", { lastChunkHandling: "stop-before-partial" }), [1, 2, 3, 1]],
+  ["stop-before-partial ignores extra bits", () => Uint8Array.fromBase64("AR==", { lastChunkHandling: "stop-before-partial" }), [1]],
+  ["stop-before-partial bad char", () => Uint8Array.fromBase64("AQ%D", { lastChunkHandling: "stop-before-partial" }), "SyntaxError"],
+
+  // fromBase64: argument validation
+  ["fromBase64 number", () => Uint8Array.fromBase64(1), "TypeError"],
+  ["fromBase64 String object", () => Uint8Array.fromBase64(new String("AQ==")), "TypeError"],
+  ["fromBase64 null options", () => Uint8Array.fromBase64("AQ==", null), "TypeError"],
+  ["fromBase64 unknown alphabet", () => Uint8Array.fromBase64("AQ==", { alphabet: "base32" }), "TypeError"],
+  ["fromBase64 unknown lastChunkHandling", () => Uint8Array.fromBase64("AQ==", { lastChunkHandling: "lenient" }), "TypeError"],
+  ["fromBase64 checks string before options", () => Uint8Array.fromBase64(1, { get alphabet() { throw new RangeError("read"); } }), "TypeError"],
+  ["fromBase64 option getter errors propagate", () => Uint8Array.fromBase64("AQ==", { get alphabet() { throw new RangeError("read"); } }), "RangeError"],
+
+  // Round trips and result shape
+  ["hex round trip", () => Uint8Array.fromHex(large.toHex()).every((value, index) => value === large[index]), true],
+  ["base64 round trip", () => Uint8Array.fromBase64(large.toBase64()).every((value, index) => value === large[index]), true],
+  ["fromHex result owns its buffer", () => Uint8Array.fromHex("00ff").buffer.byteLength, 2],
+  ["fromBase64 result owns its buffer", () => Uint8Array.fromBase64("AQ==").buffer.byteLength, 1],
+  ["fromBase64 returns Uint8Array from Buffer", () => Buffer.fromBase64("AQ==").constructor === Uint8Array, true],
+  ["methods are not enumerable", () => Object.keys(Object.getOwnPropertyDescriptors(Uint8Array)).filter((key) => Object.getOwnPropertyDescriptor(Uint8Array, key).enumerable).length, 0],
+  ["for-in sees only indexes", () => { const keys = []; for (const key in bytes(1)) keys.push(key); return keys.join(); }, "0"],
+  ["methods have spec lengths", () => [Uint8Array.prototype.toHex.length, Uint8Array.prototype.toBase64.length, Uint8Array.fromHex.length, Uint8Array.fromBase64.length].join(), "0,0,1,1"],
+  ["methods are not constructors", () => new Uint8Array.fromHex("00"), "TypeError"],
+];
+
+const failures = [];
+for (const [label, run, expected] of cases) {
+  let actual;
+  try {
+    const value = run();
+    actual = value instanceof Uint8Array ? [...value] : value;
+  } catch (error) {
+    actual = error.name;
+  }
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    failures.push({ label, expected, actual });
+  }
+}
+console.log(JSON.stringify({ total: cases.length, failures }));
+"#;
+
+fn uint8array_encoding_methods_follow_spec_in_guest_impl() {
+    let result = run_guest_script("uint8array-encoding", UINT8ARRAY_ENCODING_PROBE);
+
+    assert_eq!(result["failures"], Value::Array(Vec::new()), "{result:#}");
+}
+
+#[test]
+fn uint8array_encoding_methods_follow_spec_in_guest() {
+    run_isolated_builtin_conformance_test("uint8array-encoding");
+}
+
 fn mkdtemp_sync_collision_safe_matches_host_node_impl() {
     let cwd = temp_dir("mkdtemp-sync-collision-safe");
     let entrypoint = cwd.join("entry.mjs");
@@ -5471,6 +5628,7 @@ fn __builtin_conformance_extra_test_runner() {
         "child-process-fork-ipc" => child_process_fork_supports_basic_ipc_impl(),
         "http-socket-writes" => http_socket_writes_do_not_silently_drop_data_impl(),
         "buffer-concat-truncation" => buffer_concat_truncation_matches_host_node_impl(),
+        "uint8array-encoding" => uint8array_encoding_methods_follow_spec_in_guest_impl(),
         "mkdtemp-sync-collision-safe" => mkdtemp_sync_collision_safe_matches_host_node_impl(),
         "crypto-basic-fixture" => crypto_basic_fixture_matches_shared_expected_impl(),
         "crypto-extended" => crypto_extended_surface_matches_host_node(),
